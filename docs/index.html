@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Guyra Agro | Mapeo</title>
+<link rel="stylesheet" href="vendor/ol.css">
+<style>
+  :root {
+    --gy-green: #2e7d32;
+    --gy-green-dark: #1b5e20;
+    --gy-bg: #f4f6f4;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; background: var(--gy-bg); }
+
+  #header {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 20;
+    background: var(--gy-green-dark);
+    color: #fff;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    box-shadow: 0 2px 6px rgba(0,0,0,.25);
+  }
+  #header .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; letter-spacing: .3px; }
+  #header .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: #a5d6a7; }
+  #header .job { text-align: right; font-size: 13px; line-height: 1.3; opacity: .95; }
+  #header .job strong { display: block; font-size: 14.5px; }
+
+  #map { position: absolute; top: 56px; bottom: 0; left: 0; right: 0; }
+
+  #status {
+    position: fixed; inset: 56px 0 0 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--gy-bg);
+    color: #444;
+    font-size: 15px;
+    z-index: 15;
+    flex-direction: column;
+    gap: 10px;
+    text-align: center;
+    padding: 24px;
+  }
+  #status .spinner {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 4px solid #cfd8cf; border-top-color: var(--gy-green);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #status.hidden { display: none; }
+  #status.error { color: #a33; }
+
+  #legend {
+    position: fixed; right: 12px; bottom: 12px; z-index: 20;
+    background: rgba(255,255,255,.95);
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #333;
+    box-shadow: 0 1px 6px rgba(0,0,0,.2);
+    max-width: 220px;
+  }
+
+  .ol-scale-line { bottom: 44px !important; left: 8px !important; }
+
+  #footer-link {
+    position: fixed; left: 12px; bottom: 12px; z-index: 20;
+    background: rgba(255,255,255,.9);
+    border-radius: 8px;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: #666;
+  }
+  #footer-link a { color: var(--gy-green-dark); text-decoration: none; font-weight: 600; }
+
+  .ol-zoom { top: 68px !important; }
+  .ol-attribution { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <div class="brand"><span class="dot"></span> Guyra Agro</div>
+  <div class="job" id="job-info"></div>
+</div>
+
+<div id="map"></div>
+
+<div id="status">
+  <div class="spinner"></div>
+  <div id="status-text">Cargando el mapeo…</div>
+</div>
+
+<div id="legend" style="display:none">
+  <strong id="legend-title">Ortomosaico RGB</strong>
+  <div id="legend-sub" style="margin-top:4px;color:#666"></div>
+</div>
+
+<div id="footer-link" style="display:none">
+  Mapeo realizado por <a href="https://instagram.com/guyraagro" target="_blank" rel="noopener">Guyra Agro</a>
+</div>
+
+<script src="vendor/geotiff.js"></script>
+<script src="vendor/ol.js"></script>
+<script>
+(function () {
+  const params = new URLSearchParams(window.location.search);
+  const cogUrl = params.get('url');
+  const cliente = params.get('cliente') || '';
+  const trabajo = params.get('trabajo') || '';
+  const fecha = params.get('fecha') || '';
+  const tipo = params.get('tipo') || 'rgb'; // rgb | ndvi | ndre | ndwi | dsm
+  const nota = params.get('nota') || '';
+
+  const TIPO_LABELS = {
+    rgb: 'Ortomosaico RGB',
+    ndvi: 'Índice NDVI (vigor vegetativo)',
+    ndre: 'Índice NDRE',
+    ndwi: 'Índice NDWI (estrés hídrico)',
+    dsm: 'Modelo de elevación (DSM)',
+  };
+
+  const statusEl = document.getElementById('status');
+  const statusText = document.getElementById('status-text');
+  const jobInfo = document.getElementById('job-info');
+  const legend = document.getElementById('legend');
+  const legendTitle = document.getElementById('legend-title');
+  const legendSub = document.getElementById('legend-sub');
+  const footerLink = document.getElementById('footer-link');
+
+  function showError(msg) {
+    statusEl.classList.add('error');
+    statusText.textContent = msg;
+    document.querySelector('#status .spinner').style.display = 'none';
+  }
+
+  if (!cogUrl) {
+    showError('Falta el parámetro "url" con la dirección del mapeo a mostrar.');
+    return;
+  }
+
+  // Header info
+  let jobLines = [];
+  if (cliente) jobLines.push('<strong>' + escapeHtml(cliente) + '</strong>');
+  const subParts = [];
+  if (trabajo) subParts.push(escapeHtml(trabajo));
+  if (fecha) subParts.push(escapeHtml(fecha));
+  if (subParts.length) jobLines.push(subParts.join(' · '));
+  jobInfo.innerHTML = jobLines.join('');
+
+  legendTitle.textContent = TIPO_LABELS[tipo] || TIPO_LABELS.rgb;
+  legendSub.textContent = nota ? nota : '';
+  if (nota) legend.style.display = 'block';
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  const source = new ol.source.GeoTIFF({
+    sources: [{ url: cogUrl }],
+  });
+
+  const isSingleBand = (tipo !== 'rgb');
+  const layer = new ol.layer.WebGLTile({
+    source: source,
+    style: isSingleBand ? {
+      color: [
+        'interpolate', ['linear'], ['band', 1],
+        -1, [215, 25, 28],
+        0, [255, 255, 191],
+        1, [26, 150, 65],
+      ],
+    } : undefined,
+  });
+
+  const map = new ol.Map({
+    target: 'map',
+    layers: [layer],
+    controls: ol.control.defaults.defaults({ attribution: false }).extend([
+      new ol.control.ScaleLine(),
+    ]),
+    view: new ol.View({ center: [0, 0], zoom: 2 }),
+  });
+
+  source.getView().then((viewOptions) => {
+    map.setView(new ol.View(viewOptions));
+    statusEl.classList.add('hidden');
+    legend.style.display = 'block';
+    footerLink.style.display = 'block';
+  }).catch((err) => {
+    console.error(err);
+    showError('No se pudo cargar el mapeo. Verificá que el link del archivo sea correcto y esté disponible.');
+  });
+
+  source.on('error', function (e) {
+    console.error('GeoTIFF source error', e);
+  });
+})();
+</script>
+</body>
+</html>
