@@ -4,10 +4,13 @@ publicar_mapeo.py — Automatiza la entrega de un mapeo de Guyra Agro a un clien
 
 Dado un archivo GeoTIFF (o COG ya generado), este script:
   1. Verifica que sea un Cloud Optimized GeoTIFF válido; si no, lo convierte.
-  2. Lo sube como asset de un GitHub Release (mismo patrón que ya usás:
-     github.com/<repo>/releases/download/<tag>/<archivo>).
+  2. Lo commitea a docs/mapas/<tag>/ del repo del visor y lo pushea a GitHub,
+     para que quede servido desde el MISMO origen que el visor (GitHub
+     Pages). Importante: NO se usa GitHub Releases, porque esos assets se
+     sirven sin cabecera Access-Control-Allow-Origin y el navegador bloquea
+     la lectura por CORS (se detectó probando con un archivo real).
   3. Calcula superficie, resolución y genera una miniatura.
-  4. Arma el link al visor de Guyra Agro (viewer/index.html) con los datos
+  4. Arma el link al visor de Guyra Agro (docs/index.html) con los datos
      del trabajo cargados.
   5. Genera un PDF de una página con esos datos + un código QR al mapa.
 
@@ -15,10 +18,10 @@ Requiere en la máquina donde se ejecuta:
   - Python 3.9+ con: rasterio, rio-cogeo, fpdf2, pyproj, qrcode[pil]
     (instalar con: pip install rasterio rio-cogeo fpdf2 pyproj "qrcode[pil]")
   - GDAL (viene con rasterio, no hace falta instalarlo aparte)
-  - GitHub CLI (`gh`) autenticado: gh auth login
+  - git configurado para pushear al repo del visor sin pedir contraseña
+    (por ejemplo, con `gh auth login` + `gh auth setup-git`)
 
-Ver config.json para configurar el repo de GitHub y la URL del visor
-(una sola vez).
+Ver config.json para configurar la URL del visor (una sola vez).
 
 Uso:
   python3 publicar_mapeo.py archivo.tif \
@@ -71,8 +74,7 @@ def cargar_config():
     if not CONFIG_PATH.exists():
         print(f"No encontré {CONFIG_PATH}.")
         print("Copiá config.example.json a config.json y completá:")
-        print('  - "github_repo": tu repo de GitHub, formato "usuario/repo"')
-        print('  - "viewer_base_url": la URL pública donde publicaste la carpeta viewer/')
+        print('  - "viewer_base_url": la URL pública de GitHub Pages (ej: https://usuario.github.io/repo/)')
         sys.exit(1)
     with open(CONFIG_PATH, encoding="utf-8") as f:
         return json.load(f)
@@ -194,28 +196,39 @@ def generar_miniatura(cog_path: Path, salida_png: Path, tipo: str, max_dim=700):
         img.save(salida_png)
 
 
-def subir_a_github_release(archivo: Path, repo: str, tag: str, titulo: str) -> str:
-    """Sube el archivo como asset de un release y devuelve la URL de descarga."""
-    verificar_gh_disponible()
-    print(f"Subiendo '{archivo.name}' a {repo} (release '{tag}')...")
+def publicar_en_pages(archivo: Path, tag: str) -> str:
+    """Copia el archivo a docs/mapas/<tag>/ del repo y lo pushea a GitHub.
 
-    existe = subprocess.run(
-        ["gh", "release", "view", tag, "--repo", repo], capture_output=True, text=True
+    Importante: el archivo tiene que quedar en el MISMO origen que el visor
+    (GitHub Pages), no en un GitHub Release. Los Releases se sirven desde
+    release-assets.githubusercontent.com sin cabecera Access-Control-Allow-Origin,
+    así que el navegador bloquea la lectura por CORS sin importar la conexión
+    (esto se detectó probando con un archivo real: quedaba cargando para
+    siempre en cualquier dispositivo). Sirviendo el archivo desde docs/ del
+    mismo repo que el visor, es same-origin y el problema desaparece.
+    """
+    repo_root = SCRIPT_DIR.parent
+    destino_dir = repo_root / "docs" / "mapas" / tag
+    destino_dir.mkdir(parents=True, exist_ok=True)
+    destino = destino_dir / archivo.name
+    shutil.copy2(archivo, destino)
+
+    print(f"Subiendo '{archivo.name}' a docs/mapas/{tag}/ (mismo origen que el visor)...")
+    subprocess.run(["git", "add", str(destino)], cwd=repo_root, check=True)
+    commit = subprocess.run(
+        ["git", "-c", "user.email=nicolascarlino@gmail.com", "-c", "user.name=Nicolas Carlino",
+         "commit", "-q", "-m", f"Mapeo: {tag}"],
+        cwd=repo_root, capture_output=True, text=True,
     )
-    if existe.returncode == 0:
-        cmd = ["gh", "release", "upload", tag, str(archivo), "--repo", repo, "--clobber"]
-    else:
-        cmd = [
-            "gh", "release", "create", tag, str(archivo),
-            "--repo", repo, "--title", titulo, "--notes", "Mapeo generado por Guyra Agro",
-        ]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        print("Error subiendo el archivo a GitHub:")
-        print(r.stderr)
+    if commit.returncode != 0 and "nothing to commit" not in (commit.stdout + commit.stderr):
+        print("Error al commitear:", commit.stderr)
+        sys.exit(1)
+    push = subprocess.run(["git", "push", "origin", "main"], cwd=repo_root, capture_output=True, text=True)
+    if push.returncode != 0:
+        print("Error al subir a GitHub:", push.stderr)
         sys.exit(1)
 
-    return f"https://github.com/{repo}/releases/download/{tag}/{archivo.name}"
+    return f"mapas/{tag}/{archivo.name}"
 
 
 def armar_link_visor(viewer_base_url: str, cog_url: str, cliente: str, trabajo: str,
@@ -315,15 +328,15 @@ def main():
 
     config = {} if args.sin_subir else cargar_config()
 
+    viewer_base_url = config.get("viewer_base_url", "http://localhost:8792/index.html")
+
     if args.sin_subir:
         cog_url = f"file://{cog_final.resolve()}"
         print("Modo --sin-subir: no se sube nada a GitHub, se usa una URL local de prueba.")
     else:
-        cog_url = subir_a_github_release(
-            cog_final, config["github_repo"], tag, f"{args.cliente} - {args.trabajo}"
-        )
+        ruta_relativa = publicar_en_pages(cog_final, tag)
+        cog_url = f"{viewer_base_url.rstrip('/')}/{ruta_relativa}"
 
-    viewer_base_url = config.get("viewer_base_url", "http://localhost:8792/index.html")
     link = armar_link_visor(viewer_base_url, cog_url, args.cliente, args.trabajo,
                              args.fecha, args.tipo, args.nota)
 

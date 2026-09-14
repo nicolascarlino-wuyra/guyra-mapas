@@ -1,5 +1,6 @@
 cli/salida/
 cli/config.json
+mapeos-pendientes/
 __pycache__/
 *.pyc
 .DS_Store
