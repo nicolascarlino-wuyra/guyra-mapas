@@ -97,22 +97,36 @@ def verificar_gh_disponible():
         sys.exit(1)
 
 
-def asegurar_cog(origen: Path, salida: Path, tipo: str, lossless: bool = False) -> Path:
+CALIDAD_JPEG = {
+    "media": 85,
+    "alta": 90,
+    "maxima": 95,
+}
+
+
+def asegurar_cog(origen: Path, salida: Path, tipo: str, lossless: bool = False, calidad: str = "alta") -> Path:
     """Prepara el COG a subir.
 
     Para 'rgb' (salvo --lossless), siempre recomprime a JPEG: la subida es el
     cuello de botella real (conexiones lentas), no la fidelidad de pixel, y
     para que un cliente mire el mapa una compresión con pérdida imperceptible
-    reduce el archivo entre 5x y 10x. Para índices/DSM nunca se usa JPEG
-    (arruinaría los valores que el visor necesita para la rampa de color):
-    se deja el archivo tal cual si ya es un COG válido, o se convierte sin
-    pérdida (deflate) si no lo es.
+    reduce el archivo bastante. Para índices/DSM nunca se usa JPEG (arruinaría
+    los valores que el visor necesita para la rampa de color): se deja el
+    archivo tal cual si ya es un COG válido, o se convierte sin pérdida
+    (deflate) si no lo es.
+
+    IMPORTANTE: la clave de GDAL para controlar la calidad de compresión JPEG
+    en un GeoTIFF es 'jpeg_quality', NO 'quality' (ese nombre genérico no hace
+    nada acá, GDAL lo ignora silenciosamente y usa su default ~75). La
+    primera versión de este script usaba 'quality' por error: decía "calidad
+    90" pero en realidad se estaba comprimiendo con el default. Se corrigió.
     """
     if tipo == "rgb" and not lossless:
-        print(f"Generando COG optimizado (JPEG, calidad 90) para '{origen.name}'...")
+        jpeg_quality = CALIDAD_JPEG.get(calidad, CALIDAD_JPEG["alta"])
+        print(f"Generando COG optimizado (JPEG, calidad {calidad}={jpeg_quality}) para '{origen.name}'...")
         with rasterio.open(origen) as src:
             profile = cog_profiles.get("jpeg")
-            profile.update(quality=90)
+            profile.update(jpeg_quality=jpeg_quality)
             indexes = (1, 2, 3) if src.count >= 3 else None
             cog_translate(
                 src, str(salida), profile,
@@ -307,6 +321,9 @@ def main():
                      help="No sube nada a GitHub; solo procesa el archivo localmente (para pruebas)")
     ap.add_argument("--lossless", action="store_true",
                      help="Para --tipo rgb: no recomprimir a JPEG, subir sin pérdida (archivo mucho más pesado)")
+    ap.add_argument("--calidad", choices=CALIDAD_JPEG.keys(), default="alta",
+                     help="Para --tipo rgb: nivel de compresion JPEG. media=mas liviano/mas rapido de subir, "
+                          "alta=equilibrio (default), maxima=mejor calidad/archivo mas pesado")
     args = ap.parse_args()
 
     if not args.archivo.exists():
@@ -318,7 +335,7 @@ def main():
     slug_trabajo = slugify(args.trabajo)
     tag = f"{slug_cliente}-{slug_trabajo}-{args.fecha}"
 
-    cog_final = asegurar_cog(args.archivo, args.salida / f"{tag}_{args.tipo}.tif", args.tipo, args.lossless)
+    cog_final = asegurar_cog(args.archivo, args.salida / f"{tag}_{args.tipo}.tif", args.tipo, args.lossless, args.calidad)
 
     metadatos = calcular_metadatos(cog_final)
     print(f"Superficie: {metadatos['area_ha']} ha | Resolución: {metadatos['resolucion_cm']} cm/px")
