@@ -7,7 +7,7 @@ solo para publicar mapeos.
 
 Trae dos partes:
 
-- **`viewer/`** — Un visor propio, con la marca de Guyra Agro, que reemplaza
+- **`docs/`** — Un visor propio, con la marca de Guyra Agro, que reemplaza
   el link crudo de cogeo.org. Es una sola página HTML, sin backend: lee el
   archivo COG directamente por HTTP (igual que hace cogeo.org), pero muestra
   el nombre del cliente, el trabajo y la fecha en vez de una interfaz técnica.
@@ -48,32 +48,47 @@ Instalá `gh` desde https://cli.github.com/ y autenticate una vez:
 
 ```bash
 gh auth login
+gh auth setup-git
 ```
 
-El script usa esto para subir cada COG como asset de un GitHub Release —
-el mismo mecanismo que ya usaste en el ejemplo que me mandaste
-(`visentiniemanuelidemsa/MOSAICS`). GitHub sirve esos archivos con soporte
-de rangos HTTP, que es justo lo que el visor necesita para no tener que
-descargar el archivo entero.
+El segundo comando es necesario para que `git push` (que el script usa
+para publicar cada mapeo) pueda autenticarse solo, sin pedirte usuario y
+contraseña cada vez.
+
+El script commitea cada COG directo a la carpeta `docs/mapas/<trabajo>/`
+del repo y lo pushea a GitHub. **No se usa GitHub Releases**: los archivos
+de un Release se sirven desde otro dominio
+(`release-assets.githubusercontent.com`) sin el permiso CORS que un
+navegador necesita para leerlos desde una página en otro dominio — esto
+causaba que el visor quedara cargando para siempre, sin importar la
+velocidad de conexión. Sirviendo el archivo desde `docs/` del mismo repo
+que el visor (GitHub Pages), navegador y archivo quedan en el mismo
+origen y el problema desaparece — de yapa, GitHub Pages además responde
+con permiso CORS abierto.
 
 Necesitás un repositorio de GitHub donde ir subiendo los mapeos (puede ser
 uno nuevo, dedicado a esto, público o privado — si es privado el cliente
 va a necesitar estar logueado en GitHub para ver el archivo, así que para
-compartir con productores conviene que sea público).
+compartir con productores conviene que sea público). El visor y los
+mapeos van en el **mismo repo** (el visor en `docs/`, los mapeos en
+`docs/mapas/`), justamente para que queden en el mismo origen.
 
-**Límite a tener en cuenta:** GitHub permite hasta 2 GB por archivo en un
-Release. Si tus ortomosaicos de 1 cm/píxel superan eso, vas a necesitar
-comprimir más agresivo o buscar otro storage (backblaze B2, Cloudflare R2,
-etc. — avisame si llegás a este punto y lo resolvemos).
+**A tener en cuenta:** cada mapeo publicado queda commiteado en el
+historial de git del repo, así que el repo va a ir creciendo con el
+tiempo (aun comprimidos a JPEG, cada ortomosaico son ~20-40 MB). Si en
+algún momento se vuelve un problema de tamaño, se puede mover a un repo
+de "datos" separado del repo del visor, o podar mapeos viejos del
+historial — avisame si llegás a ese punto.
 
 ### 3. Publicar el visor
 
-El visor (`viewer/`) tiene que quedar accesible en una URL pública. Dos
-opciones simples:
+El visor (`docs/`) tiene que quedar accesible en una URL pública, y tiene
+que ser **GitHub Pages sobre este mismo repo** (no Netlify ni otro
+servicio): el script publica cada mapeo dentro de `docs/mapas/` de este
+repo, así que si el visor viviera en otro lado, visor y archivo quedarían
+en dominios distintos y el problema de CORS que ya resolvimos volvería.
 
-**Opción A — GitHub Pages (gratis):**
 ```bash
-cd viewer
 git init
 git add .
 git commit -m "Visor de mapas Guyra Agro"
@@ -81,12 +96,9 @@ git branch -M main
 git remote add origin https://github.com/TU-USUARIO/guyra-mapas.git
 git push -u origin main
 ```
-Después, en GitHub → Settings → Pages, activar Pages desde la rama `main`.
-Tu visor queda en `https://TU-USUARIO.github.io/guyra-mapas/`.
-
-**Opción B — Netlify** (igual que ya hacés con agrogestion.html): arrastrar
-la carpeta `viewer/` a Netlify. Te da una URL tipo
-`https://guyra-mapas.netlify.app/`.
+Después, en GitHub → Settings → Pages, activar Pages desde la rama `main`,
+carpeta `/docs`. Tu visor queda en
+`https://TU-USUARIO.github.io/guyra-mapas/`.
 
 ### 4. Configurar el script
 
@@ -98,7 +110,6 @@ cp config.example.json config.json
 Editá `config.json`:
 ```json
 {
-  "github_repo": "tu-usuario/guyra-mapas-datos",
   "viewer_base_url": "https://tu-usuario.github.io/guyra-mapas/"
 }
 ```
@@ -117,9 +128,9 @@ python3 publicar_mapeo.py ../ejemplos/mapa-sintetico-prueba.tif \
 
 Esto te va a dejar un PDF en `cli/salida/`. Para ver el visor andando de
 verdad (con el mapa renderizado, no solo el PDF) hace falta servir el
-archivo por HTTP en vez de `file://` — una vez que subas `viewer/` a GitHub
-Pages o Netlify (paso 3 más abajo) y tengas un COG real subido a un Release,
-el link que te da el script ya funciona directo.
+archivo por HTTP en vez de `file://` — una vez que publiques `docs/` en
+GitHub Pages (paso 3 más abajo) y corras el script sin `--sin-subir`, el
+link que te da ya funciona directo.
 
 ## Uso (cada mapeo nuevo)
 
@@ -135,7 +146,8 @@ python3 publicar_mapeo.py /ruta/al/ortomosaico.tif \
 
 Esto:
 1. Verifica que el archivo sea un COG válido (si no, lo convierte).
-2. Lo sube a tu repo de GitHub como Release.
+2. Lo commitea a `docs/mapas/` de tu repo de GitHub y lo pushea (mismo
+   origen que el visor, para evitar el bloqueo de CORS de los Releases).
 3. Calcula superficie (ha) y resolución (cm/píxel).
 4. Genera una miniatura y un código QR.
 5. Te devuelve el link del visor y un PDF en `cli/salida/`.
