@@ -95,14 +95,42 @@ def verificar_gh_disponible():
         sys.exit(1)
 
 
-def asegurar_cog(origen: Path, salida: Path) -> Path:
-    """Verifica que el archivo sea un COG válido; si no, lo convierte."""
+def asegurar_cog(origen: Path, salida: Path, tipo: str, lossless: bool = False) -> Path:
+    """Prepara el COG a subir.
+
+    Para 'rgb' (salvo --lossless), siempre recomprime a JPEG: la subida es el
+    cuello de botella real (conexiones lentas), no la fidelidad de pixel, y
+    para que un cliente mire el mapa una compresión con pérdida imperceptible
+    reduce el archivo entre 5x y 10x. Para índices/DSM nunca se usa JPEG
+    (arruinaría los valores que el visor necesita para la rampa de color):
+    se deja el archivo tal cual si ya es un COG válido, o se convierte sin
+    pérdida (deflate) si no lo es.
+    """
+    if tipo == "rgb" and not lossless:
+        print(f"Generando COG optimizado (JPEG, calidad 90) para '{origen.name}'...")
+        with rasterio.open(origen) as src:
+            profile = cog_profiles.get("jpeg")
+            profile.update(quality=90)
+            indexes = (1, 2, 3) if src.count >= 3 else None
+            cog_translate(
+                src, str(salida), profile,
+                indexes=indexes, in_memory=False, quiet=False, add_mask=True,
+            )
+        ok, errores, _ = cog_validate(str(salida))
+        if not ok:
+            print(f"No se pudo generar un COG válido: {errores}")
+            sys.exit(1)
+        origen_mb = origen.stat().st_size / 1e6
+        salida_mb = salida.stat().st_size / 1e6
+        print(f"Tamaño: {origen_mb:.1f} MB -> {salida_mb:.1f} MB (para subir sin pérdida usá --lossless)")
+        return salida
+
     ok, errores, _ = cog_validate(str(origen))
     if ok:
         print(f"'{origen.name}' ya es un COG válido, no hace falta convertir.")
         return origen
 
-    print(f"'{origen.name}' no es un COG válido ({errores}). Convirtiendo...")
+    print(f"'{origen.name}' no es un COG válido ({errores}). Convirtiendo (sin pérdida)...")
     with rasterio.open(origen) as src:
         profile = cog_profiles.get("deflate")
         cog_translate(src, str(salida), profile, in_memory=False, quiet=False)
@@ -264,6 +292,8 @@ def main():
     ap.add_argument("--salida", type=Path, default=Path("salida"), help="Carpeta donde dejar COG/PDF generados")
     ap.add_argument("--sin-subir", action="store_true",
                      help="No sube nada a GitHub; solo procesa el archivo localmente (para pruebas)")
+    ap.add_argument("--lossless", action="store_true",
+                     help="Para --tipo rgb: no recomprimir a JPEG, subir sin pérdida (archivo mucho más pesado)")
     args = ap.parse_args()
 
     if not args.archivo.exists():
@@ -275,7 +305,7 @@ def main():
     slug_trabajo = slugify(args.trabajo)
     tag = f"{slug_cliente}-{slug_trabajo}-{args.fecha}"
 
-    cog_final = asegurar_cog(args.archivo, args.salida / f"{tag}_{args.tipo}.tif")
+    cog_final = asegurar_cog(args.archivo, args.salida / f"{tag}_{args.tipo}.tif", args.tipo, args.lossless)
 
     metadatos = calcular_metadatos(cog_final)
     print(f"Superficie: {metadatos['area_ha']} ha | Resolución: {metadatos['resolucion_cm']} cm/px")
