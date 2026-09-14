@@ -97,7 +97,7 @@ def verificar_gh_disponible():
         sys.exit(1)
 
 
-CALIDAD_JPEG = {
+CALIDAD_WEBP = {
     "media": 85,
     "alta": 90,
     "maxima": 95,
@@ -107,26 +107,36 @@ CALIDAD_JPEG = {
 def asegurar_cog(origen: Path, salida: Path, tipo: str, lossless: bool = False, calidad: str = "alta") -> Path:
     """Prepara el COG a subir.
 
-    Para 'rgb' (salvo --lossless), siempre recomprime a JPEG: la subida es el
-    cuello de botella real (conexiones lentas), no la fidelidad de pixel, y
-    para que un cliente mire el mapa una compresión con pérdida imperceptible
-    reduce el archivo bastante. Para índices/DSM nunca se usa JPEG (arruinaría
-    los valores que el visor necesita para la rampa de color): se deja el
-    archivo tal cual si ya es un COG válido, o se convierte sin pérdida
-    (deflate) si no lo es.
+    Para 'rgb' (salvo --lossless), siempre recomprime, con pérdida, para
+    achicar el archivo. Para índices/DSM nunca se recomprime con pérdida
+    (arruinaría los valores que el visor necesita para la rampa de color):
+    se deja el archivo tal cual si ya es un COG válido, o se convierte sin
+    pérdida (deflate) si no lo es.
 
-    IMPORTANTE: la clave de GDAL para controlar la calidad de compresión JPEG
-    en un GeoTIFF es 'jpeg_quality', NO 'quality' (ese nombre genérico no hace
-    nada acá, GDAL lo ignora silenciosamente y usa su default ~75). La
-    primera versión de este script usaba 'quality' por error: decía "calidad
-    90" pero en realidad se estaba comprimiendo con el default. Se corrigió.
+    IMPORTANTE (bug real, detectado 2026-09-14 con una captura de Nico):
+    la primera versión de esto usaba JPEG (compress='jpeg'). GDAL comprime
+    JPEG-en-GeoTIFF internamente en espacio de color YCbCr (photometric=
+    YCbCr) y reconvierte a RGB al leer -- eso funciona perfecto server-side
+    (rasterio/gdalinfo, y por eso el PSNR medido daba bien), pero la
+    librería que usa el visor en el navegador (geotiff.js) NO hace esa
+    conversión YCbCr->RGB al decodificar: el resultado se ve con un
+    corrimiento de color magenta/cian bien visible (confirmado
+    reproduciendo el mismo archivo con Playwright: server-side perfecto,
+    en el visor real distorsionado). No es un problema de "calidad", es
+    un bug de decodificación -- ningún jpeg_quality lo arregla.
+    Cambiado a WEBP (compress='webp', que además no usa YCbCr en este
+    pipeline): confirmado con Playwright que decodifica bien en el visor
+    real, y de yapa da archivos más chicos que JPEG a igual nivel.
+    La clave de GDAL para el nivel de compresión WEBP es 'webp_level'
+    (0-100, no 'quality': ese nombre genérico se ignora en silencio, el
+    mismo tipo de bug que ya hubo con JPEG/jpeg_quality).
     """
     if tipo == "rgb" and not lossless:
-        jpeg_quality = CALIDAD_JPEG.get(calidad, CALIDAD_JPEG["alta"])
-        print(f"Generando COG optimizado (JPEG, calidad {calidad}={jpeg_quality}) para '{origen.name}'...")
+        webp_level = CALIDAD_WEBP.get(calidad, CALIDAD_WEBP["alta"])
+        print(f"Generando COG optimizado (WEBP, calidad {calidad}={webp_level}) para '{origen.name}'...")
         with rasterio.open(origen) as src:
-            profile = cog_profiles.get("jpeg")
-            profile.update(jpeg_quality=jpeg_quality)
+            profile = cog_profiles.get("webp")
+            profile.update(webp_level=webp_level)
             indexes = (1, 2, 3) if src.count >= 3 else None
             cog_translate(
                 src, str(salida), profile,
@@ -320,9 +330,9 @@ def main():
     ap.add_argument("--sin-subir", action="store_true",
                      help="No sube nada a GitHub; solo procesa el archivo localmente (para pruebas)")
     ap.add_argument("--lossless", action="store_true",
-                     help="Para --tipo rgb: no recomprimir a JPEG, subir sin pérdida (archivo mucho más pesado)")
-    ap.add_argument("--calidad", choices=CALIDAD_JPEG.keys(), default="alta",
-                     help="Para --tipo rgb: nivel de compresion JPEG. media=mas liviano/mas rapido de subir, "
+                     help="Para --tipo rgb: no recomprimir, subir sin pérdida (archivo mucho más pesado)")
+    ap.add_argument("--calidad", choices=CALIDAD_WEBP.keys(), default="alta",
+                     help="Para --tipo rgb: nivel de compresion WEBP. media=mas liviano/mas rapido de subir, "
                           "alta=equilibrio (default), maxima=mejor calidad/archivo mas pesado")
     args = ap.parse_args()
 
