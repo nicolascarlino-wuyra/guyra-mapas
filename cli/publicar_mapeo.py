@@ -3,12 +3,16 @@
 publicar_mapeo.py — Automatiza la entrega de un mapeo de Guyra Agro a un cliente.
 
 Dado un archivo GeoTIFF (o COG ya generado), este script:
-  1. Verifica que sea un Cloud Optimized GeoTIFF válido; si no, lo convierte.
-  2. Lo commitea a docs/mapas/<tag>/ del repo del visor y lo pushea a GitHub,
-     para que quede servido desde el MISMO origen que el visor (GitHub
-     Pages). Importante: NO se usa GitHub Releases, porque esos assets se
-     sirven sin cabecera Access-Control-Allow-Origin y el navegador bloquea
-     la lectura por CORS (se detectó probando con un archivo real).
+  1. Verifica que sea un Cloud Optimized GeoTIFF válido; si no, lo convierte
+     (comprimiendo con pérdida a WEBP para --tipo rgb, salvo --lossless).
+  2. Lo sube a uno de dos lugares, según --storage:
+     - "pages" (default): lo commitea a docs/mapas/<tag>/ del repo del
+       visor y lo pushea a GitHub, mismo origen que el visor (GitHub
+       Pages). Tiene el límite duro de GitHub de 100MB por archivo.
+     - "r2": lo sube a un bucket de Cloudflare R2 (S3-compatible), sin ese
+       límite de tamaño. Usar para mapeos grandes. El visor sigue viviendo
+       en GitHub Pages; solo el archivo del COG se sirve desde R2 (hace
+       falta CORS configurado en el bucket para el origen del visor).
   3. Calcula superficie, resolución y genera una miniatura.
   4. Arma el link al visor de Guyra Agro (docs/index.html) con los datos
      del trabajo cargados.
@@ -18,8 +22,11 @@ Requiere en la máquina donde se ejecuta:
   - Python 3.9+ con: rasterio, rio-cogeo, fpdf2, pyproj, qrcode[pil]
     (instalar con: pip install rasterio rio-cogeo fpdf2 pyproj "qrcode[pil]")
   - GDAL (viene con rasterio, no hace falta instalarlo aparte)
-  - git configurado para pushear al repo del visor sin pedir contraseña
-    (por ejemplo, con `gh auth login` + `gh auth setup-git`)
+  - Para --storage pages: git configurado para pushear al repo del visor
+    sin pedir contraseña (por ejemplo, con `gh auth login` + `gh auth
+    setup-git`)
+  - Para --storage r2: boto3 (`pip install boto3`) y los datos de la
+    cuenta de Cloudflare R2 en config.json (ver README)
 
 Ver config.json para configurar la URL del visor (una sola vez).
 
@@ -255,6 +262,61 @@ def publicar_en_pages(archivo: Path, tag: str) -> str:
     return f"mapas/{tag}/{archivo.name}"
 
 
+def publicar_en_r2(archivo: Path, tag: str, config: dict) -> str:
+    """Sube el archivo a Cloudflare R2 (almacenamiento S3-compatible) y devuelve
+    la URL pública completa.
+
+    A diferencia de docs/mapas/ + GitHub Pages, R2 no tiene el límite duro de
+    100MB por archivo de GitHub, no infla el historial de git con cada mapeo,
+    y no depende de que git termine de subir dentro de una ventana de tiempo
+    corta -- importante para archivos grandes (detectado 2026-09-15 con un
+    mapeo real de ~1000 millones de píxeles que en WEBP calidad alta da un
+    archivo de varios cientos de MB, muy por encima de lo que entra en el
+    repo de GitHub).
+
+    Requiere en config.json: r2_account_id, r2_bucket, r2_public_url (la URL
+    pública del bucket -- el subdominio *.r2.dev o un dominio propio), y las
+    credenciales r2_access_key_id / r2_secret_access_key (generadas en el
+    dashboard de Cloudflare, permiso "Object Read & Write" limitado a este
+    bucket). r2_endpoint es opcional, si no está se arma solo a partir del
+    account_id.
+    """
+    try:
+        import boto3
+        from boto3.s3.transfer import TransferConfig
+    except ImportError:
+        print("Falta instalar boto3 para subir a R2. Corré: pip install boto3")
+        sys.exit(1)
+
+    requeridos = ("r2_account_id", "r2_bucket", "r2_public_url", "r2_access_key_id", "r2_secret_access_key")
+    faltantes = [k for k in requeridos if not config.get(k)]
+    if faltantes:
+        print(f"Faltan datos de R2 en config.json: {', '.join(faltantes)}")
+        print("Ver README para los pasos de configuración de Cloudflare R2.")
+        sys.exit(1)
+
+    endpoint = config.get("r2_endpoint") or f"https://{config['r2_account_id']}.r2.cloudflarestorage.com"
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        aws_access_key_id=config["r2_access_key_id"],
+        aws_secret_access_key=config["r2_secret_access_key"],
+        region_name="auto",
+    )
+    key = f"mapas/{tag}/{archivo.name}"
+    tamano_mb = archivo.stat().st_size / 1e6
+    print(f"Subiendo '{archivo.name}' ({tamano_mb:.1f} MB) a Cloudflare R2 (bucket {config['r2_bucket']}, key {key})...")
+    # multipart automático para archivos grandes, con varias partes en paralelo
+    transfer_config = TransferConfig(multipart_threshold=8 * 1024 * 1024,
+                                      multipart_chunksize=16 * 1024 * 1024,
+                                      max_concurrency=4)
+    s3.upload_file(str(archivo), config["r2_bucket"], key,
+                    Config=transfer_config, ExtraArgs={"ContentType": "image/tiff"})
+    public_url = f"{config['r2_public_url'].rstrip('/')}/{key}"
+    print(f"Subido a R2. URL pública: {public_url}")
+    return public_url
+
+
 def armar_link_visor(viewer_base_url: str, cog_url: str, cliente: str, trabajo: str,
                       fecha: str, tipo: str, nota: str) -> str:
     params = {"url": cog_url, "cliente": cliente, "trabajo": trabajo, "fecha": fecha, "tipo": tipo}
@@ -334,6 +396,9 @@ def main():
     ap.add_argument("--calidad", choices=CALIDAD_WEBP.keys(), default="alta",
                      help="Para --tipo rgb: nivel de compresion WEBP. media=mas liviano/mas rapido de subir, "
                           "alta=equilibrio (default), maxima=mejor calidad/archivo mas pesado")
+    ap.add_argument("--storage", choices=["pages", "r2"], default="pages",
+                     help="Donde queda alojado el archivo: 'pages' (docs/mapas/ del repo de GitHub, limite duro "
+                          "de 100MB por archivo) o 'r2' (Cloudflare R2, sin ese limite -- usar para mapeos grandes)")
     args = ap.parse_args()
 
     if not args.archivo.exists():
@@ -359,7 +424,9 @@ def main():
 
     if args.sin_subir:
         cog_url = f"file://{cog_final.resolve()}"
-        print("Modo --sin-subir: no se sube nada a GitHub, se usa una URL local de prueba.")
+        print("Modo --sin-subir: no se sube nada, se usa una URL local de prueba.")
+    elif args.storage == "r2":
+        cog_url = publicar_en_r2(cog_final, tag, config)
     else:
         ruta_relativa = publicar_en_pages(cog_final, tag)
         cog_url = f"{viewer_base_url.rstrip('/')}/{ruta_relativa}"
